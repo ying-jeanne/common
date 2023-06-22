@@ -1,14 +1,20 @@
-package tracing
+package telemetry
 
 import (
 	"context"
 	"io"
+	"time"
 
-	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
-	jaeger "github.com/uber/jaeger-client-go"
 	jaegercfg "github.com/uber/jaeger-client-go/config"
 	jaegerprom "github.com/uber/jaeger-lib/metrics/prometheus"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ErrInvalidConfiguration is an error to notify client to provide valid trace report agent or config server
@@ -16,8 +22,11 @@ var (
 	ErrBlankTraceConfiguration = errors.New("no trace report agent, config server, or collector endpoint specified")
 )
 
-// installJaeger registers Jaeger as the OpenTracing implementation.
+// installJaeger registers Jaeger as the Opentelemetry implementation.
 func installJaeger(serviceName string, cfg *jaegercfg.Configuration, options ...jaegercfg.Option) (io.Closer, error) {
+	mProvider, err := NewMeterProvider(serviceName)
+	exitOnError(err, "error setting up OTel for metrics")
+
 	metricsFactory := jaegerprom.New()
 
 	// put the metricsFactory earlier so provided options can override it
@@ -51,29 +60,56 @@ func NewFromEnv(serviceName string, options ...jaegercfg.Option) (io.Closer, err
 
 // ExtractTraceID extracts the trace id, if any from the context.
 func ExtractTraceID(ctx context.Context) (string, bool) {
-	sp := opentracing.SpanFromContext(ctx)
-	if sp == nil {
+	sp := trace.SpanFromContext(ctx)
+	traceId := sp.SpanContext().TraceID().String()
+	if traceId == "" {
 		return "", false
 	}
-	sctx, ok := sp.Context().(jaeger.SpanContext)
-	if !ok {
-		return "", false
-	}
-
-	return sctx.TraceID().String(), true
+	return traceId, true
 }
 
 // ExtractSampledTraceID works like ExtractTraceID but the returned bool is only
 // true if the returned trace id is sampled.
 func ExtractSampledTraceID(ctx context.Context) (string, bool) {
-	sp := opentracing.SpanFromContext(ctx)
-	if sp == nil {
+	sp := trace.SpanFromContext(ctx)
+	traceId := sp.SpanContext().TraceID().String()
+	if traceId == "" {
 		return "", false
 	}
-	sctx, ok := sp.Context().(jaeger.SpanContext)
-	if !ok {
-		return "", false
+	return traceId, sp.SpanContext().IsSampled()
+}
+
+func NewTracerProvider(serviceName string) (*sdktrace.TracerProvider, error) {
+	exp, err := newExporter()
+	if err != nil {
+		return nil, err
 	}
 
-	return sctx.TraceID().String(), sctx.IsSampled()
+	r, err := NewResource(serviceName)
+	if err != nil {
+		return nil, err
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exp),
+		sdktrace.WithResource(r),
+	)
+
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+
+	return tp, nil
+}
+
+func newExporter() (*otlptrace.Exporter, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return otlptracegrpc.New(ctx)
+}
+
+func GetTracer() trace.Tracer {
+	return otel.GetTracerProvider().Tracer("otlp-gateway")
 }

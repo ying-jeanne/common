@@ -9,10 +9,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	jaegercfg "github.com/uber/jaeger-client-go/config"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/baggage"
 	"google.golang.org/grpc"
 
 	"github.com/weaveworks/common/httpgrpc"
@@ -119,8 +120,8 @@ func TestTracePropagation(t *testing.T) {
 
 	server, err := newTestServer(middleware.Tracer{}.Wrap(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			span := opentracing.SpanFromContext(r.Context())
-			fmt.Fprint(w, span.BaggageItem("name"))
+			baggageList := baggage.FromContext(r.Context())
+			fmt.Fprint(w, baggageList.Member("name").String())
 		}),
 	))
 
@@ -133,8 +134,13 @@ func TestTracePropagation(t *testing.T) {
 	req, err := http.NewRequest("GET", "/hello", &bytes.Buffer{})
 	require.NoError(t, err)
 
-	sp, ctx := opentracing.StartSpanFromContext(context.Background(), "Test")
-	sp.SetBaggageItem("name", "world")
+	member, err := baggage.NewMember("name", "value")
+	require.NoError(t, err)
+	bag, _ := baggage.New(member)
+	require.NoError(t, err)
+	ctx := baggage.ContextWithBaggage(context.Background(), bag)
+	ctx, sp := otel.GetTracerProvider().Tracer("from/test").Start(ctx, "Test")
+	defer sp.End()
 
 	req = req.WithContext(user.InjectOrgID(ctx, "1"))
 	recorder := httptest.NewRecorder()

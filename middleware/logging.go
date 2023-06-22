@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/weaveworks/common/logging"
-	"github.com/weaveworks/common/tracing"
+	"github.com/weaveworks/common/telemetry"
 	"github.com/weaveworks/common/user"
 )
 
